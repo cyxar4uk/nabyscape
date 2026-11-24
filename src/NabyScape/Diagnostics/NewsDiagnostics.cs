@@ -17,10 +17,26 @@ internal static class NewsDiagnostics
 {
     private sealed class Fixture : HttpMessageHandler
     {
+        internal int SourceRequests;
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
         {
             var args=Environment.GetCommandLineArgs();int at=Array.IndexOf(args,"--news-fixture");
             string? dir=at>=0 && at+1<args.Length?args[at+1]:null;
+            if(request.RequestUri!.AbsolutePath.EndsWith("/sources",StringComparison.Ordinal))
+            {
+                SourceRequests++;string[] ids=Uri.UnescapeDataString(request.RequestUri.Query[5..]).Split(',');
+                object[] sources=Array.Empty<object>();
+                if(dir!=null)
+                {
+                    using var doc=System.Text.Json.JsonDocument.Parse(File.ReadAllBytes(Path.Combine(dir,"news-sources.json")));
+                    sources=doc.RootElement.EnumerateArray().Where(e=>ids.Contains(e.GetProperty("id").ToString())).Select(e=>{
+                        string photo=e.GetProperty("avatar").GetString()??"";
+                        return (object)new{id=e.GetProperty("id").ToString(),name=e.GetProperty("name").GetString(),avatar=photo.StartsWith('/')?photo:"/media/"+photo};
+                    }).ToArray();
+                }
+                else sources=new object[]{new{id="1",name="Тестовая редакция",avatar="/cover.jpg"}};
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(System.Text.Json.JsonSerializer.Serialize(new{version=1,sources}),Encoding.UTF8,"application/json")});
+            }
             if(dir!=null && request.RequestUri!.AbsolutePath.StartsWith("/media/avatars/",StringComparison.Ordinal))
             {
                 string avatar=Path.Combine(dir,"avatars",Path.GetFileName(request.RequestUri.AbsolutePath));if(!File.Exists(avatar))return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
@@ -34,7 +50,7 @@ internal static class NewsDiagnostics
             if(!feed && dir!=null)return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(File.ReadAllText(Path.Combine(dir,"digest.json")),Encoding.UTF8,"application/json")});
             var items=Enumerable.Range(1,feed?20:5).Select(i=>feed?(object)new{id=i.ToString(),title="Тестовая новость "+i+": городские библиотеки открывают новые читальные залы",summary="Пример текста для проверки раскрытия новости. Это тестовые данные интерфейса, а не новостное сообщение.",source="Тестовая редакция",publishedAt="2026-11-24 20:00",url="https://example.org/story",notes=new[]{"Тестовая сноска источника, которую нужно сохранить целиком."}}:new{postId=i.ToString(),head="Тестовая сводка "+i+": новые маршруты и события недели",nsrc=i+2,notes=Array.Empty<string>()});
             string body=System.Text.Json.JsonSerializer.Serialize(new{title=feed?"Лента · тестовые данные":"Главное · тестовые данные",items});
-            if(!feed)body=body.Replace("\"postId\":","\"cover\":\"/cover.jpg\",\"postId\":");
+            if(!feed)body=body.Replace("\"postId\":","\"srcs\":[\"1\"],\"cover\":\"/cover.jpg\",\"postId\":");
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(body,Encoding.UTF8,"application/json")});
         }
     }
@@ -43,9 +59,8 @@ internal static class NewsDiagnostics
         var settings=app.Settings;settings.ReduceMotion=true;settings.NewsConnected=true;settings.GlassStyle=false;settings.Background="#000000";
         bool live=Environment.GetCommandLineArgs().Contains("--news-live");
         settings.NewsApiBaseUrl=live?Environment.GetEnvironmentVariable("NABYSCAPE_NEWS_API")??"https://news.anyway-community.ru/api":"https://example.org/api";
-        if(!live){app.News.Dispose();app.News=new NewsService(new Fixture());}
+        var fixture=new Fixture();if(!live){app.News.Dispose();app.News=new NewsService(fixture);}
         var command=Environment.GetCommandLineArgs();int fixtureAt=Array.IndexOf(command,"--news-fixture");
-        if(fixtureAt>=0 && fixtureAt+1<command.Length)app.News.LoadSources(Path.Combine(command[fixtureAt+1],"news-sources.json"),settings.NewsApiBaseUrl);
         settings.Widgets.Single(w=>w.Id=="news").Enabled=true;settings.CompactLayout=true;settings.PanelWidth=420;settings.PanelMaxHeight=650;settings.PanelAutoHeight=true;
         app.ChangeSettings();island.Show();island.Reveal(false);island.SelectPage("news",false);await Task.Delay(150);
         var view=Diagnostics.Descendants(island).OfType<NewsView>().Single();
@@ -57,6 +72,7 @@ internal static class NewsDiagnostics
             var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));using var stream=File.Create(Path.Combine(directory,name+".png"));encoder.Save(stream);
         }
         await Wait();check("News digest loads through configured HTTP API",view.Shown?.Items.Length>0);Capture("news-digest-dark");
+        if(!live)check("Source avatars arrive through the API without a profile catalog",fixture.SourceRequests>0 && !File.Exists(Path.Combine(app.Store.DirectoryPath,"news-sources.json")));
         var links=new System.Collections.Generic.List<Uri>();view.LinkObserver=links.Add;
         var brand=Diagnostics.Descendants(view).OfType<Button>().Single(b=>System.Windows.Automation.AutomationProperties.GetName(b)=="Открыть приложение Anyway News");
         brand.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));check("Anyway logo and name open the mini app",links.Single()==NewsService.AppLink);

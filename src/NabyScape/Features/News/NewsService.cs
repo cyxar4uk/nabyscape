@@ -16,7 +16,11 @@ public sealed partial class Settings
 }
 
 internal sealed record NewsItem(string Id,string Title,string Summary,string Source,string PublishedAt,Uri? Url,string[] Notes,string Cover="")
-{internal string[] SourceIds {get;init;}=Array.Empty<string>();}
+{
+    internal string[] SourceIds {get;init;}=Array.Empty<string>();
+    internal NewsSource[] Sources {get;init;}=Array.Empty<NewsSource>();
+    internal string SourcesApi {get;init;}="";
+}
 internal sealed record NewsSource(string Id,string Name,string Avatar);
 internal sealed record NewsSnapshot(string Title,NewsItem[] Items,DateTimeOffset FetchedAt);
 
@@ -28,26 +32,9 @@ internal sealed class NewsService : IDisposable
     private readonly Dictionary<string,NewsSnapshot> cache=new();
     private readonly Dictionary<string,DateTimeOffset> attempts=new();
     private readonly Dictionary<string,byte[]> images=new();
-    private readonly Dictionary<string,NewsSource> sources=new();
-    private string sourceOrigin="";
-    internal void LoadSources(string path,string address="https://news.anyway-community.ru/api")
-    {
-        if(!File.Exists(path))return;
-        using var doc=JsonDocument.Parse(File.ReadAllBytes(path));if(doc.RootElement.ValueKind!=JsonValueKind.Array)return;
-        sources.Clear();sourceOrigin=BaseUri(address).GetLeftPart(UriPartial.Authority);
-        foreach(var row in doc.RootElement.EnumerateArray().Take(2000))
-        {
-            if(!row.TryGetProperty("id",out var id) || !row.TryGetProperty("name",out var name))continue;
-            string key=id.ToString(),label=name.GetString()??"",avatar=row.TryGetProperty("avatar",out var photo) && photo.ValueKind==JsonValueKind.String?photo.GetString()??"":"";
-            if(avatar.Length>0 && !avatar.StartsWith('/') && !Uri.TryCreate(avatar,UriKind.Absolute,out _))avatar="/media/"+avatar;
-            sources[key]=new(key,label,avatar);
-        }
-    }
+    private readonly Dictionary<string,(DateTimeOffset At,NewsSource? Source)> sources=new();
     internal NewsSource[] SourcesFor(NewsItem item,string address)
-    {
-        if(sourceOrigin!=BaseUri(address).GetLeftPart(UriPartial.Authority))return Array.Empty<NewsSource>();
-        return item.SourceIds.Where(sources.ContainsKey).Select(id=>sources[id]).Take(2).ToArray();
-    }
+        =>item.SourcesApi==BaseUri(address).AbsoluteUri?item.Sources:Array.Empty<NewsSource>();
     internal static readonly Uri AppLink=new("https://t.me/anyway_news_bot?startapp");
     internal NewsService(HttpMessageHandler? handler=null)
     {
@@ -76,7 +63,7 @@ internal sealed class NewsService : IDisposable
             if(attempts.TryGetValue(key,out var last) && now-last<TimeSpan.FromSeconds(15))
             {if(saved!=null)return saved;throw new HttpRequestException("Повторите через несколько секунд.");}
             attempts[key]=now;
-            using var timeout=CancellationTokenSource.CreateLinkedTokenSource(token);timeout.CancelAfter(TimeSpan.FromSeconds(15));token=timeout.Token;
+            var sourceToken=token;using var timeout=CancellationTokenSource.CreateLinkedTokenSource(token);timeout.CancelAfter(TimeSpan.FromSeconds(15));token=timeout.Token;
             var endpoint=new Uri(root,feed?"v2/integrations/news/feed":"v2/digest");
             using var response=await http.GetAsync(endpoint,HttpCompletionOption.ResponseHeadersRead,token);
             if(response.StatusCode==System.Net.HttpStatusCode.NotFound && feed)
@@ -86,9 +73,45 @@ internal sealed class NewsService : IDisposable
             using var data=new MemoryStream();var buffer=new byte[8192];int count;
             while((count=await stream.ReadAsync(buffer,token))>0)
             {if(data.Length+count>1024*1024)throw new InvalidDataException("Ответ API слишком большой.");await data.WriteAsync(buffer.AsMemory(0,count),token);}
-            var snapshot=Parse(data.ToArray(),feed,DateTimeOffset.UtcNow);cache[key]=snapshot;return snapshot;
+            var snapshot=Parse(data.ToArray(),feed,DateTimeOffset.UtcNow);
+            snapshot=await LoadSourceDetails(root,snapshot,sourceToken);cache[key]=snapshot;return snapshot;
         }
         finally{gate.Release();}
+    }
+    private async Task<NewsSnapshot> LoadSourceDetails(Uri root,NewsSnapshot snapshot,CancellationToken token)
+    {
+        var ids=snapshot.Items.SelectMany(i=>i.SourceIds).Where(id=>long.TryParse(id,out _)).Distinct().Take(20).ToArray();
+        string key=root.AbsoluteUri;var now=DateTimeOffset.UtcNow;
+        var missing=ids.Where(id=>!sources.TryGetValue(key+id,out var entry) || now-entry.At>=TimeSpan.FromMinutes(10)).ToArray();
+        if(missing.Length>0)
+        {
+            try
+            {
+                using var timeout=CancellationTokenSource.CreateLinkedTokenSource(token);timeout.CancelAfter(TimeSpan.FromSeconds(5));
+                var uri=new Uri(root,"v2/integrations/news/sources?ids="+string.Join(',',missing.Select(Uri.EscapeDataString)));
+                using var response=await http.GetAsync(uri,HttpCompletionOption.ResponseHeadersRead,timeout.Token);response.EnsureSuccessStatusCode();
+                using var stream=await response.Content.ReadAsStreamAsync(timeout.Token);using var bytes=new MemoryStream();var buffer=new byte[8192];int read;
+                while((read=await stream.ReadAsync(buffer,timeout.Token))>0)
+                {if(bytes.Length+read>256*1024)throw new InvalidDataException("Ответ источников слишком большой.");await bytes.WriteAsync(buffer.AsMemory(0,read),timeout.Token);}
+                using var doc=JsonDocument.Parse(bytes.ToArray());
+                if(doc.RootElement.ValueKind!=JsonValueKind.Object || !doc.RootElement.TryGetProperty("sources",out var entries) || entries.ValueKind!=JsonValueKind.Array)throw new InvalidDataException("Неизвестный формат источников.");
+                var found=new Dictionary<string,NewsSource>();
+                foreach(var entry in entries.EnumerateArray().Take(20))
+                {
+                    if(entry.ValueKind!=JsonValueKind.Object || !entry.TryGetProperty("id",out var id) || id.ValueKind is not (JsonValueKind.String or JsonValueKind.Number))continue;
+                    string sid=id.ToString();if(!missing.Contains(sid) || !entry.TryGetProperty("name",out var name) || name.ValueKind!=JsonValueKind.String)continue;
+                    string label=name.GetString()??"",avatar=entry.TryGetProperty("avatar",out var image) && image.ValueKind==JsonValueKind.String?image.GetString()??"":"";
+                    found[sid]=new(sid,label.Length>200?label[..200]:label,avatar.Length<=2000 && CoverUri(key,avatar)!=null?avatar:"");
+                }
+                foreach(string id in missing)
+                {if(sources.Count>=256)sources.Remove(sources.Keys.First());sources[key+id]=(now,found.GetValueOrDefault(id));}
+            }
+            catch(OperationCanceledException) when(!token.IsCancellationRequested){/* Source metadata must not hide the news. */}
+            catch(Exception ex) when(ex is HttpRequestException or IOException or InvalidDataException or JsonException or ArgumentException){/* Keep cached labels or neutral circles. */}
+        }
+        return snapshot with{Items=snapshot.Items.Select(item=>item with{
+            SourcesApi=key,Sources=item.SourceIds.Where(id=>sources.TryGetValue(key+id,out var entry) && entry.Source!=null).Select(id=>sources[key+id].Source!).Take(2).ToArray()
+        }).ToArray()};
     }
     internal static Uri? SafeLink(string? value)
         =>Uri.TryCreate(value,UriKind.Absolute,out var uri) && uri.Scheme is "https" or "http" && uri.UserInfo.Length==0?uri:null;

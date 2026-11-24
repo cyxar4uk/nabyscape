@@ -14,11 +14,19 @@ internal static class NewsTests
     {
         internal int Calls;
         internal string Path="";
+        internal string SourcesBody="{\"sources\":[]}";
+        internal HttpStatusCode SourcesStatus=HttpStatusCode.OK;
+        internal int SourceCalls;
+        internal string SourceQuery="";
         internal HttpStatusCode Status=HttpStatusCode.OK;
         internal string Type="application/json";
         internal string Body="{\"title\":\"Главное\",\"items\":[{\"postId\":\"123\",\"head\":\"Новость\",\"notes\":[\"Полная сноска\"]}]}";
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
-        {Calls++;Path=request.RequestUri!.AbsolutePath;return Task.FromResult(new HttpResponseMessage(Status){Content=new StringContent(Body,Encoding.UTF8,Type)});}
+        {
+            if(request.Headers.Authorization!=null || request.Headers.Contains("Cookie"))throw new Exception("News requests must be anonymous");
+            Calls++;Path=request.RequestUri!.AbsolutePath;bool sources=Path.EndsWith("/sources",StringComparison.Ordinal);if(sources){SourceCalls++;SourceQuery=request.RequestUri.Query;}
+            return Task.FromResult(new HttpResponseMessage(sources?SourcesStatus:Status){Content=new StringContent(sources?SourcesBody:Body,Encoding.UTF8,Type)});
+        }
     }
     internal static void Run(Action<string,Action> test)
     {
@@ -72,17 +80,31 @@ internal static class NewsTests
             network.Body="small-image-fixture";var first=await service.Cover("https://example.org/api","/b.jpg",CancellationToken.None);int calls=network.Calls;
             Assert(first!=null && ReferenceEquals(first,await service.Cover("https://example.org/api","/b.jpg",CancellationToken.None)) && network.Calls==calls);
         }).GetAwaiter().GetResult());
-        test("News source IDs resolve to real catalog avatars only on their API origin",()=>
+        test("News resolves source avatars anonymously through the API without a local catalog",()=>Task.Run(async ()=>
         {
-            string file=Path.Combine(Path.GetTempPath(),"news-sources-"+Guid.NewGuid().ToString("N")+".json");
-            try
+            var network=new Network{Body="{\"items\":[{\"postId\":\"123\",\"head\":\"Новость\",\"srcs\":[-1,\"missing\"]}]}",SourcesBody="{\"sources\":[{\"id\":\"-1\",\"name\":\"Редакция\",\"avatar\":\"/media/avatars/source.png\"}]}"};using var service=new NewsService(network);
+            var snapshot=await service.Get("https://example.org/api",false,false,CancellationToken.None);
+            var sources=service.SourcesFor(snapshot.Items[0],"https://example.org/api");Assert(sources.Length==1 && sources[0].Name=="Редакция" && sources[0].Avatar=="/media/avatars/source.png");
+            Assert(network.SourceCalls==1 && network.SourceQuery=="?ids=-1" && service.SourcesFor(snapshot.Items[0],"https://another.org/api").Length==0);
+            await service.Get("https://example.org/api",false,false,CancellationToken.None);Assert(network.SourceCalls==1);
+        }).GetAwaiter().GetResult());
+        test("News source API failures leave the summary readable",()=>Task.Run(async ()=>
+        {
+            foreach(var body in new[]{"{\"sources\":[]}","{\"wrong\":true}",new string('x',256*1024+1)})
             {
-                File.WriteAllText(file,"[{\"id\":\"-1\",\"name\":\"Редакция\",\"avatar\":\"avatars/source.png\"}]");using var service=new NewsService(new Network());service.LoadSources(file,"https://example.org/api");
-                var snapshot=NewsService.Parse(Encoding.UTF8.GetBytes("{\"items\":[{\"postId\":\"123\",\"head\":\"Новость\",\"srcs\":[-1,\"missing\"]}]}"),false,DateTimeOffset.UtcNow);
-                var sources=service.SourcesFor(snapshot.Items[0],"https://example.org/api");Assert(sources.Length==1 && sources[0].Name=="Редакция" && sources[0].Avatar=="/media/avatars/source.png");
-                Assert(service.SourcesFor(snapshot.Items[0],"https://another.org/api").Length==0);
+                var network=new Network{Body="{\"items\":[{\"postId\":\"123\",\"head\":\"Новость\",\"srcs\":[1]}]}",SourcesBody=body};using var service=new NewsService(network);
+                var snapshot=await service.Get("https://example.org/api",false,false,CancellationToken.None);Assert(snapshot.Items[0].Title=="Новость" && snapshot.Items[0].Sources.Length==0);
             }
-            finally{File.Delete(file);}
-        });
+            var unavailable=new Network{Body="{\"items\":[{\"postId\":\"1\",\"head\":\"Новость\",\"srcs\":[1]}]}",SourcesStatus=HttpStatusCode.NotFound};using var fallback=new NewsService(unavailable);
+            Assert((await fallback.Get("https://example.org/api",false,false,CancellationToken.None)).Items.Length==1);
+        }).GetAwaiter().GetResult());
+        test("News ignores unrequested source metadata and third-party avatar URLs",()=>Task.Run(async ()=>
+        {
+            var network=new Network{Body="{\"items\":[{\"postId\":\"1\",\"head\":\"Новость\",\"srcs\":[1]}]}",SourcesBody="{\"sources\":[{\"id\":\"2\",\"name\":\"Other\",\"avatar\":\"/a.png\"},{\"id\":\"1\",\"name\":\"Source\",\"avatar\":\"https://other.org/track.png\"}]}"};using var service=new NewsService(network);
+            var snapshot=await service.Get("https://example.org/api",false,false,CancellationToken.None);Assert(snapshot.Items[0].Sources.Length==1 && snapshot.Items[0].Sources[0].Avatar=="");
+            network.Body="{\"items\":[{\"id\":\"2\",\"title\":\"Лента\",\"srcs\":[1]}]}";await service.Get("https://example.org/api",true,false,CancellationToken.None);Assert(network.SourceCalls==1);
+            network.Body="{\"items\":[{\"postId\":\"3\",\"head\":\"Сводка\",\"srcs\":[1]}]}";
+            await service.Get("https://example.org/other-api",false,false,CancellationToken.None);Assert(network.SourceCalls==2);
+        }).GetAwaiter().GetResult());
     }
 }
