@@ -21,6 +21,11 @@ internal static class NewsDiagnostics
         {
             var args=Environment.GetCommandLineArgs();int at=Array.IndexOf(args,"--news-fixture");
             string? dir=at>=0 && at+1<args.Length?args[at+1]:null;
+            if(dir!=null && request.RequestUri!.AbsolutePath.StartsWith("/media/avatars/",StringComparison.Ordinal))
+            {
+                string avatar=Path.Combine(dir,"avatars",Path.GetFileName(request.RequestUri.AbsolutePath));if(!File.Exists(avatar))return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+                var response=new HttpResponseMessage(HttpStatusCode.OK){Content=new ByteArrayContent(File.ReadAllBytes(avatar))};response.Content.Headers.ContentType=new("image/png");return Task.FromResult(response);
+            }
             if(request.RequestUri!.AbsolutePath=="/cover.jpg")
             {
                 var response=new HttpResponseMessage(HttpStatusCode.OK){Content=new ByteArrayContent(dir!=null?File.ReadAllBytes(Path.Combine(dir,"cover.jpg")):Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))};response.Content.Headers.ContentType=new("image/png");return Task.FromResult(response);
@@ -39,6 +44,8 @@ internal static class NewsDiagnostics
         bool live=Environment.GetCommandLineArgs().Contains("--news-live");
         settings.NewsApiBaseUrl=live?Environment.GetEnvironmentVariable("NABYSCAPE_NEWS_API")??"https://news.anyway-community.ru/api":"https://example.org/api";
         if(!live){app.News.Dispose();app.News=new NewsService(new Fixture());}
+        var command=Environment.GetCommandLineArgs();int fixtureAt=Array.IndexOf(command,"--news-fixture");
+        if(fixtureAt>=0 && fixtureAt+1<command.Length)app.News.LoadSources(Path.Combine(command[fixtureAt+1],"news-sources.json"),settings.NewsApiBaseUrl);
         settings.Widgets.Single(w=>w.Id=="news").Enabled=true;settings.CompactLayout=true;settings.PanelWidth=420;settings.PanelMaxHeight=650;settings.PanelAutoHeight=true;
         app.ChangeSettings();island.Show();island.Reveal(false);island.SelectPage("news",false);await Task.Delay(150);
         var view=Diagnostics.Descendants(island).OfType<NewsView>().Single();
@@ -57,7 +64,19 @@ internal static class NewsDiagnostics
         check("Digest has no weather tab",!Diagnostics.Descendants(view).OfType<Button>().Any(b=>System.Windows.Automation.AutomationProperties.GetName(b).Contains("Погода")));
         var firstStory=Diagnostics.Descendants(view).OfType<Button>().First(b=>System.Windows.Automation.AutomationProperties.GetName(b)==view.Shown!.Items[0].Title);firstStory.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));check("Digest story opens its card in the mini app",links.Last()==view.Shown!.Items[0].Url);
         check("Digest poster cover decodes",Diagnostics.Descendants(view).OfType<Image>().Count(i=>i.Source!=null)>=2);
-        var connection=Diagnostics.Descendants(view).OfType<Button>().Single(b=>Equals(b.Content,"Подключение"));
+        var headline=Diagnostics.Descendants(firstStory).OfType<TextBlock>().First(t=>t.Text==view.Shown!.Items[0].Title);
+        var photo=Diagnostics.Descendants(firstStory).OfType<Image>().First();
+        // UniformToFill may extend the image beyond its clipped viewport; compare the visible frame.
+        var photoFrame=(FrameworkElement)photo.Parent;
+        check("Headline sits below the clipped photograph without overlapping it",photoFrame.Clip!=null && headline.TranslatePoint(new Point(),firstStory).Y>=photoFrame.TranslatePoint(new Point(0,photoFrame.ActualHeight),firstStory).Y);
+        var feedLink=Diagnostics.Descendants(view).OfType<Button>().Single(b=>System.Windows.Automation.AutomationProperties.GetName(b)=="Открыть ленту в мини-приложении");
+        feedLink.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));check("All news opens the working mini app",links.Last()==NewsService.AppLink);
+        await view.Reload();await Wait();
+        check("Cached refresh preserves the story and decoded images",ReferenceEquals(firstStory,Diagnostics.Descendants(view).OfType<Button>().First(b=>System.Windows.Automation.AutomationProperties.GetName(b)==view.Shown!.Items[0].Title)) && photo.Source!=null);
+        check("Source avatars keep square bounds and circular clipping",Diagnostics.Descendants(view).OfType<Image>().Where(i=>Equals(i.Tag,"news-source-avatar")).All(i=>i.Width==i.Height && i.Clip is EllipseGeometry));
+        check("News hover does not create duplicate pop-out tooltips",!Diagnostics.Descendants(view).OfType<FrameworkElement>().Any(e=>e.IsVisible && e.ToolTip!=null));
+        if(fixtureAt>=0 && fixtureAt+1<command.Length && File.Exists(Path.Combine(command[fixtureAt+1],"news-sources.json")))check("Real source avatars decode in circular headline groups",Diagnostics.Descendants(view).OfType<Image>().Count(i=>Equals(i.Tag,"news-source-avatar") && i.Source!=null)>=4);
+        var connection=Diagnostics.Descendants(view).OfType<Button>().Single(b=>System.Windows.Automation.AutomationProperties.GetName(b)=="Подключение");
         var connectionBounds=connection.TransformToAncestor(island).TransformBounds(new Rect(connection.RenderSize));
         check("News footer remains inside the island contour",connectionBounds.Bottom<=island.PaintedHeight-8);
         view.Select(true);await Wait();check("News feed loads through read-only HTTP API",view.Shown?.Items.Length>0);Capture("news-feed-dark");
@@ -67,10 +86,20 @@ internal static class NewsDiagnostics
             settings.PanelWidth=width;app.ChangeSettings();island.SelectPage("news",false);await Task.Delay(100);
             view=Diagnostics.Descendants(island).OfType<NewsView>().Single();await Wait();
             check("News fits panel width "+width,view.ActualWidth>0 && view.ActualWidth<=island.PaintedWidth);
-            var footer=Diagnostics.Descendants(view).OfType<Button>().Single(b=>Equals(b.Content,"Подключение"));
+            var footer=Diagnostics.Descendants(view).OfType<Button>().Single(b=>System.Windows.Automation.AutomationProperties.GetName(b)=="Подключение");
             check("News footer fits at width "+width,footer.TransformToAncestor(island).TransformBounds(new Rect(footer.RenderSize)).Bottom<=island.PaintedHeight-8);
             Capture("news-width-"+width);
         }
+        settings.PanelWidth=300;settings.PanelMaxHeight=360;settings.PanelScale=1.25;app.ChangeSettings();island.SelectPage("news",false);await Task.Delay(120);view=Diagnostics.Descendants(island).OfType<NewsView>().Single();await Wait();
+        var smallScroll=Diagnostics.Descendants(view).OfType<ScrollViewer>().Single();
+        var lastStory=Diagnostics.Descendants(view).OfType<Button>().Last(b=>view.Shown!.Items.Any(i=>i.Title==System.Windows.Automation.AutomationProperties.GetName(b)));
+        smallScroll.ScrollToBottom();await Task.Delay(100);island.UpdateLayout();
+        check("Last story can be reached inside the small scaled viewport",smallScroll.ScrollableHeight>0 && lastStory.TranslatePoint(new Point(0,lastStory.ActualHeight),smallScroll).Y<=smallScroll.ActualHeight+1);
+        var smallSettings=Diagnostics.Descendants(view).OfType<Button>().Single(b=>System.Windows.Automation.AutomationProperties.GetName(b)=="Подключение");smallSettings.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));await Task.Delay(200);island.UpdateLayout();Capture("news-connection-small");
+        check("Connection form scrolls inside the card and keeps the footer visible",view.TransformToAncestor(island).TransformBounds(new Rect(view.RenderSize)).Bottom<=island.PaintedHeight-8 && smallSettings.TransformToAncestor(island).TransformBounds(new Rect(smallSettings.RenderSize)).Bottom<=island.PaintedHeight-8 && smallScroll.VerticalOffset==0);
+        var smallBrand=Diagnostics.Descendants(view).OfType<TextBlock>().Single(t=>t.Text=="by Anyway News");
+        check("Brand signature does not collide with actions at narrow scaled widths",smallBrand.TranslatePoint(new Point(smallBrand.ActualWidth,0),view).X<=smallSettings.TranslatePoint(new Point(),view).X);
+        settings.PanelScale=1;settings.PanelMaxHeight=650;settings.PanelWidth=526;
         settings.ColorTheme="Light";app.ChangeSettings();island.SelectPage("news",false);await Task.Delay(120);view=Diagnostics.Descendants(island).OfType<NewsView>().Single();await Wait();Capture("news-digest-light");
         check("News renders with the native Light theme",ThemeInk.IsLight && view.Shown?.Items.Length>0);
         settings.PanelMaxHeight=417;settings.PanelWidth=420;app.ChangeSettings();island.SelectPage("news",false);await Task.Delay(120);view=Diagnostics.Descendants(island).OfType<NewsView>().Single();await Wait();Capture("news-default-height");

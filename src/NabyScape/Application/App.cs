@@ -26,6 +26,7 @@ public sealed partial class App : Application
     internal CountdownAudio CountdownAudio {get;}=new();
     internal DownloadArrivals? Downloads {get;private set;}
     private bool diagnosticMode;
+    internal bool NewsPreviewMode {get;private set;}
     private string downloadConfiguration="";
     private int downloadEpoch;
     private void DownloadReady(string[] paths)
@@ -109,8 +110,11 @@ public sealed partial class App : Application
         base.OnStartup(e);
         bool assistantFixture=Array.Exists(e.Args,a=>a=="--assistant-only") && Array.Exists(e.Args,a=>a=="--diagnostics");
         bool showcaseFixture=Array.Exists(e.Args,a=>a=="--showcase") && Array.Exists(e.Args,a=>a=="--diagnostics");
+        int newsPreviewAt=Array.IndexOf(e.Args,"--news-preview");bool newsPreview=newsPreviewAt>=0;
+        NewsPreviewMode=newsPreview;
+        string? newsProfile=newsPreview && newsPreviewAt+1<e.Args.Length?Path.GetFullPath(e.Args[newsPreviewAt+1]):null;
         bool isolatedFixture=Array.Exists(e.Args,a=>a=="--isolated-diagnostics") && Array.IndexOf(e.Args,"--diagnostics") is int diagnosticAt && diagnosticAt>=0 && diagnosticAt+1<e.Args.Length;
-        string instance=isolatedFixture?"Local\\LumaIsland.IsolatedDiagnostics":showcaseFixture?"Local\\LumaIsland.Showcase":assistantFixture?"Local\\LumaIsland.AssistantDiagnostics":"Local\\LumaIsland";
+        string instance=newsPreview?"Local\\NabyScape.AnywayPreview":isolatedFixture?"Local\\LumaIsland.IsolatedDiagnostics":showcaseFixture?"Local\\LumaIsland.Showcase":assistantFixture?"Local\\LumaIsland.AssistantDiagnostics":"Local\\LumaIsland";
         mutex=new Mutex(true,instance+".Desktop",out var created);
         if(!created) {try {using var signal=EventWaitHandle.OpenExisting(instance+".OpenSettings");signal.Set();}catch(WaitHandleCannotBeOpenedException){}Shutdown();return; }
         openEvent=new EventWaitHandle(false,EventResetMode.AutoReset,instance+".OpenSettings");
@@ -122,7 +126,10 @@ public sealed partial class App : Application
         var diagnosticIndex=Array.IndexOf(e.Args,"--diagnostics");
         var diagnosticPath=diagnosticIndex>=0 && diagnosticIndex+1<e.Args.Length ? e.Args[diagnosticIndex+1] : null;
         diagnosticMode=diagnosticPath!=null;
-        Store=new(diagnosticPath==null ? null : Path.Combine(diagnosticPath,"test-profile"));bool existingProfile=File.Exists(Path.Combine(Store.DirectoryPath,"settings.json"));Settings=diagnosticPath==null?Store.Load<Settings>("settings"):new Settings();Settings.Normalize();Localization.Configure(Settings);Settings.AutoStart=StartupService.Enabled();
+        Store=new(newsPreview?newsProfile??Path.Combine(AppContext.BaseDirectory,"news-preview-profile"):diagnosticPath==null ? null : Path.Combine(diagnosticPath,"test-profile"));bool existingProfile=File.Exists(Path.Combine(Store.DirectoryPath,"settings.json"));Settings=newsPreview && !existingProfile || diagnosticPath!=null?new Settings():Store.Load<Settings>("settings");Settings.Normalize();
+        if(newsPreview){Settings.NewsConnected=true;Settings.AutoCheckUpdates=Settings.AutoDownloadUpdates=Settings.ClipboardHistory=Settings.DownloadsEnabled=Settings.MediaIntegrationEnabled=false;Settings.HideFullscreen=Settings.HideMaximized=false;Settings.CompactLayout=true;Settings.PanelWidth=416;Settings.PanelMaxHeight=600;Settings.PanelAutoHeight=true;Settings.HotkeyEnabled=Settings.VisibilityHotkeyEnabled=Settings.TuckHotkeyEnabled=false;foreach(var widget in Settings.Widgets)widget.Enabled=widget.Id=="news";Store.Save("settings",Settings);}
+        try{News.LoadSources(Path.Combine(Store.DirectoryPath,"news-sources.json"),Settings.NewsApiBaseUrl);}catch(Exception ex) when(ex is IOException or System.Text.Json.JsonException or ArgumentException){Store.Log(ex);}
+        Localization.Configure(Settings);Settings.AutoStart=StartupService.Enabled();
         if(assistantFixture || isolatedFixture){Settings.HotkeyEnabled=Settings.VisibilityHotkeyEnabled=Settings.TuckHotkeyEnabled=false;Settings.HideFullscreen=Settings.HideMaximized=false;}
         Updates=new(Store,Array.Exists(e.Args,a=>a=="--stage3-only")?new Stage3Diagnostics.Network():null,stagingDirectory:diagnosticPath!=null?Path.Combine(Store.DirectoryPath,"updates"):null);
         ApplyAppearance();
@@ -157,7 +164,7 @@ public sealed partial class App : Application
         menu.Items.Add(Localization.Text("Quit"),null,(_,_)=>Dispatcher.Invoke(Quit));
         tray.ContextMenuStrip=menu;tray.DoubleClick+=(_,_)=>Dispatcher.Invoke(ShowSettings);
         overlay=new OverlayWindow(this);MainWindow=overlay;StartupTrace.Attach(overlay,e.Args,Store.Log);overlay.Show();Previews=new(this,overlay.OpenFeaturePage);
-        Assistant.Changed+=RefreshAssistantTray;if(diagnosticPath==null)Assistant.StartBackgroundFeatures();
+        Assistant.Changed+=RefreshAssistantTray;if(diagnosticPath==null && !newsPreview)Assistant.StartBackgroundFeatures();
         Notifications.Changed+=()=>overlay.RefreshNotice();
         Updates.UpdateAvailable+=release=>Dispatcher.BeginInvoke(()=>PostNotice(new("updates","Update available",release.Version+" · Open Settings > Application to review.")));
         Updates.DownloadReady+=()=>Dispatcher.BeginInvoke(()=>PostNotice(new("updates",Localization.Text("Update ready to install"),Localization.Text("Open Settings > Application to install and restart when ready."))));
@@ -200,6 +207,8 @@ public sealed partial class App : Application
         if(diagnosticPath==null)UpdateHandoff.SignalStarted(e.Args);
         if(diagnosticPath==null) _=Updates.Check(false,Settings.AutoCheckUpdates,Settings.AutoDownloadUpdates);
         if(diagnosticPath!=null) _=Diagnostics.Run(this,overlay,diagnosticPath);
+        else if(newsPreview)
+        {Dispatcher.BeginInvoke(DispatcherPriority.Loaded,()=>{overlay.Title="NabyScape · Anyway News";overlay.Show();overlay.Reveal();overlay.SelectPage("news",false);});}
         else
         {
             bool offerWelcome=false;

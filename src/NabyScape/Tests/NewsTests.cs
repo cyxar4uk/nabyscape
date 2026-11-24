@@ -72,5 +72,17 @@ internal static class NewsTests
             network.Body="small-image-fixture";var first=await service.Cover("https://example.org/api","/b.jpg",CancellationToken.None);int calls=network.Calls;
             Assert(first!=null && ReferenceEquals(first,await service.Cover("https://example.org/api","/b.jpg",CancellationToken.None)) && network.Calls==calls);
         }).GetAwaiter().GetResult());
+        test("News source IDs resolve to real catalog avatars only on their API origin",()=>
+        {
+            string file=Path.Combine(Path.GetTempPath(),"news-sources-"+Guid.NewGuid().ToString("N")+".json");
+            try
+            {
+                File.WriteAllText(file,"[{\"id\":\"-1\",\"name\":\"Редакция\",\"avatar\":\"avatars/source.png\"}]");using var service=new NewsService(new Network());service.LoadSources(file,"https://example.org/api");
+                var snapshot=NewsService.Parse(Encoding.UTF8.GetBytes("{\"items\":[{\"postId\":\"123\",\"head\":\"Новость\",\"srcs\":[-1,\"missing\"]}]}"),false,DateTimeOffset.UtcNow);
+                var sources=service.SourcesFor(snapshot.Items[0],"https://example.org/api");Assert(sources.Length==1 && sources[0].Name=="Редакция" && sources[0].Avatar=="/media/avatars/source.png");
+                Assert(service.SourcesFor(snapshot.Items[0],"https://another.org/api").Length==0);
+            }
+            finally{File.Delete(file);}
+        });
     }
 }

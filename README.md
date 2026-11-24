@@ -1,4 +1,4 @@
-> **Anyway News fork:** optional news digest and feed widget in the native island style. [Setup, API contract and current server availability](docs/anyway-news.md). Based on upstream NabyScape 2.27.0; this is a fork, not an external plugin package.
+> **Anyway News fork:** [Download preview 3 for Windows x64](https://github.com/cyxar4uk/nabyscape/releases/tag/v2.27.0-anyway.3) · [Setup, API contract and current server availability](docs/anyway-news.md). Readable headlines, circular source avatars when a catalog is available, and scrolling contained inside the native island. Based on upstream NabyScape 2.27.0; this is a fork, not an external plugin package. The upstream downloads below do not include this widget.
 
 <p align="center"><a href="https://nabyscape.vercel.app/"><img src="Assets/showcase/readme-web3-cover.jpg" width="100%" alt="NabyScape: a black and chrome Naby companion, lime accents and a compact Windows dock."></a></p>
 
