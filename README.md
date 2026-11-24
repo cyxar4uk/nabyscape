@@ -1,3 +1,5 @@
+> **Anyway News fork:** optional news digest and feed widget in the native island style. [Setup, API contract and current server availability](docs/anyway-news.md). Based on upstream NabyScape 2.27.0; this is a fork, not an external plugin package.
+
 <p align="center"><a href="https://nabyscape.vercel.app/"><img src="Assets/showcase/readme-web3-cover.jpg" width="100%" alt="NabyScape: a black and chrome Naby companion, lime accents and a compact Windows dock."></a></p>
 
 <p align="center"><a href="https://github.com/BillyNabil/nabyscape/releases/latest"><strong>Download for Windows ↗</strong></a> &nbsp; · &nbsp; <a href="https://nabyscape.vercel.app/">Website</a> &nbsp; · &nbsp; <a href="docs/guide.md">User guide</a> &nbsp; · &nbsp; <a href="#support-nabyscape">Support ♥</a> &nbsp; · &nbsp; <a href="LICENSE">MIT licensed</a></p>
