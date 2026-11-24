@@ -1,0 +1,21 @@
+Source commit: 82c3d53e4661ce75b4cf6b49979767d547c1a293
+Base: BillyNabil/nabyscape main, c776aad41110c7cf496072cf5e30e8c38846e8dd
+
+Local verification on Windows x64:
+- 624 logic tests passed, zero failed.
+- 40 WPF news scenarios passed in the final self-contained EXE.
+- Six UI languages; 150% text; high contrast; narrow panel and 125% panel scale.
+- Explicit connection/disconnection, source metadata, navigation, cancellation and cached refresh.
+- WPF CI fixture uses an in-memory HTTP handler and generated sample stories, without network or credentials.
+- A separate live API check produced the native screenshot.
+- 60 Settings section render checks and five isolated uninstall-plan checks passed.
+
+Official release packaging was run locally for win-x64 and win-arm64:
+- All five release asset SHA-256 hashes independently recomputed.
+- PE architecture, setup/portable executable identity and WinGet metadata verified.
+- All ten license notices, including Microsoft Fluent System Icons, present in both portable ZIPs and the notices ZIP.
+- ARM64 binaries were compiled and packaged; execution was tested only on x64.
+
+Preview provenance:
+news-widget-native.png is an unedited native WPF render of the implementation.
+news-widget-naby-concept.png is a promotional styling concept. The chrome frame is not implemented in the proposed code.
