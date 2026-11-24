@@ -15,7 +15,7 @@ public sealed partial class Settings
     public bool NewsConnected {get;set;}
 }
 
-internal sealed record NewsItem(string Id,string Title,string Summary,string Source,string PublishedAt,Uri? Url,string[] Notes);
+internal sealed record NewsItem(string Id,string Title,string Summary,string Source,string PublishedAt,Uri? Url,string[] Notes,string Cover="");
 internal sealed record NewsSnapshot(string Title,NewsItem[] Items,DateTimeOffset FetchedAt);
 
 // Public read-only API: never reuse Telegram sessions, bot tokens or dev/admin auth.
@@ -25,6 +25,8 @@ internal sealed class NewsService : IDisposable
     private readonly SemaphoreSlim gate=new(1,1);
     private readonly Dictionary<string,NewsSnapshot> cache=new();
     private readonly Dictionary<string,DateTimeOffset> attempts=new();
+    private readonly Dictionary<string,byte[]> images=new();
+    internal static readonly Uri AppLink=new("https://t.me/anyway_news_bot?startapp");
     internal NewsService(HttpMessageHandler? handler=null)
     {
         http=new(handler??new HttpClientHandler{AllowAutoRedirect=false}){Timeout=TimeSpan.FromSeconds(15)};
@@ -67,6 +69,24 @@ internal sealed class NewsService : IDisposable
     }
     internal static Uri? SafeLink(string? value)
         =>Uri.TryCreate(value,UriKind.Absolute,out var uri) && uri.Scheme is "https" or "http" && uri.UserInfo.Length==0?uri:null;
+    internal static Uri? CoverUri(string address,string cover)
+    {
+        if(string.IsNullOrWhiteSpace(cover))return null;
+        var root=BaseUri(address);
+        if(!Uri.TryCreate(root,cover,out var uri) || uri.Scheme!=root.Scheme || uri.Authority!=root.Authority || uri.UserInfo.Length>0)return null;
+        return uri;
+    }
+    internal async Task<byte[]?> Cover(string address,string cover,CancellationToken token)
+    {
+        var uri=CoverUri(address,cover);if(uri==null)return null;
+        if(images.TryGetValue(uri.AbsoluteUri,out var saved))return saved;
+        using var response=await http.GetAsync(uri,HttpCompletionOption.ResponseHeadersRead,token);
+        if(!response.IsSuccessStatusCode || response.Content.Headers.ContentType?.MediaType?.StartsWith("image/",StringComparison.OrdinalIgnoreCase)!=true)return null;
+        using var source=await response.Content.ReadAsStreamAsync(token);using var bytes=new MemoryStream();var buffer=new byte[8192];int read;
+        while((read=await source.ReadAsync(buffer,token))>0)
+        {if(bytes.Length+read>2*1024*1024)return null;await bytes.WriteAsync(buffer.AsMemory(0,read),token);}
+        var data=bytes.ToArray();if(images.Count>=12)images.Remove(images.Keys.First());images[uri.AbsoluteUri]=data;return data;
+    }
     internal static NewsSnapshot Parse(byte[] json,bool feed,DateTimeOffset fetchedAt)
     {
         using var doc=JsonDocument.Parse(json);var root=doc.RootElement;
@@ -85,7 +105,7 @@ internal sealed class NewsService : IDisposable
             if(!feed && item.TryGetProperty("nsrc",out var ns) && ns.ValueKind==JsonValueKind.Number && ns.TryGetInt32(out int sources) && sources>0)source="Источников: "+sources;
             var url=SafeLink(Text(item,"url"));
             if(!feed && id.Length>0 && id.All(char.IsAsciiDigit))url=new Uri("https://t.me/anyway_news_bot/app?startapp=post_"+id);
-            result.Add(new(id,title,Text(item,"summary"),source,Text(item,"publishedAt",80),url,notes));
+            result.Add(new(id,title,Text(item,"summary"),source,Text(item,"publishedAt",80),url,notes,Text(item,"cover",2000)));
             if(result.Count==(feed?20:5))break;
         }
         return new(Text(root,"title",200),result.ToArray(),fetchedAt);

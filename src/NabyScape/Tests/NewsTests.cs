@@ -15,9 +15,10 @@ internal static class NewsTests
         internal int Calls;
         internal string Path="";
         internal HttpStatusCode Status=HttpStatusCode.OK;
+        internal string Type="application/json";
         internal string Body="{\"title\":\"Главное\",\"items\":[{\"postId\":\"123\",\"head\":\"Новость\",\"notes\":[\"Полная сноска\"]}]}";
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
-        {Calls++;Path=request.RequestUri!.AbsolutePath;return Task.FromResult(new HttpResponseMessage(Status){Content=new StringContent(Body,Encoding.UTF8,"application/json")});}
+        {Calls++;Path=request.RequestUri!.AbsolutePath;return Task.FromResult(new HttpResponseMessage(Status){Content=new StringContent(Body,Encoding.UTF8,Type)});}
     }
     internal static void Run(Action<string,Action> test)
     {
@@ -29,6 +30,10 @@ internal static class NewsTests
             foreach(string input in new[]{"file:///tmp","http://example.org/api","https://user:secret@example.org","https://example.org?key=secret","javascript:alert(1)",""})
             {bool rejected=false;try{NewsService.BaseUri(input);}catch(ArgumentException){rejected=true;}Assert(rejected);}
             Assert(NewsService.SafeLink("file:///C:/secret")==null && NewsService.SafeLink("javascript:alert(1)")==null);
+            Assert(NewsService.CoverUri("https://example.org/api","/media/a.jpg")!.AbsoluteUri=="https://example.org/media/a.jpg");
+            Assert(NewsService.CoverUri("https://example.org/api","https://other.org/track.jpg")==null);
+            Assert(NewsService.CoverUri("https://example.org/api","file:///secret")==null);
+            Assert(NewsService.AppLink.Host=="t.me" && NewsService.AppLink.Query=="?startapp");
         });
         test("News preserves full legal notes, deduplicates stories and limits digest",()=>
         {
@@ -59,5 +64,13 @@ internal static class NewsTests
         }).GetAwaiter().GetResult());
         test("News module is opt-in and survives settings normalization",()=>
         {var settings=new Settings();settings.Normalize();Assert(!settings.Widgets.Find(w=>w.Id=="news")!.Enabled && !settings.NewsConnected);settings.Widgets.Find(w=>w.Id=="news")!.Enabled=true;settings.Normalize();Assert(settings.Widgets.Find(w=>w.Id=="news")!.Enabled);});
+        test("News cover stays on its API origin and rejects oversized image responses",()=>Task.Run(async ()=>
+        {
+            var network=new Network{Type="image/jpeg",Body=new string('x',2*1024*1024+1)};using var service=new NewsService(network);
+            Assert(await service.Cover("https://example.org/api","https://other.org/a.jpg",CancellationToken.None)==null && network.Calls==0);
+            Assert(await service.Cover("https://example.org/api","/a.jpg",CancellationToken.None)==null);
+            network.Body="small-image-fixture";var first=await service.Cover("https://example.org/api","/b.jpg",CancellationToken.None);int calls=network.Calls;
+            Assert(first!=null && ReferenceEquals(first,await service.Cover("https://example.org/api","/b.jpg",CancellationToken.None)) && network.Calls==calls);
+        }).GetAwaiter().GetResult());
     }
 }

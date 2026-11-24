@@ -19,9 +19,17 @@ internal static class NewsDiagnostics
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
         {
+            var args=Environment.GetCommandLineArgs();int at=Array.IndexOf(args,"--news-fixture");
+            string? dir=at>=0 && at+1<args.Length?args[at+1]:null;
+            if(request.RequestUri!.AbsolutePath=="/cover.jpg")
+            {
+                var response=new HttpResponseMessage(HttpStatusCode.OK){Content=new ByteArrayContent(dir!=null?File.ReadAllBytes(Path.Combine(dir,"cover.jpg")):Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))};response.Content.Headers.ContentType=new("image/png");return Task.FromResult(response);
+            }
             bool feed=request.RequestUri!.AbsolutePath.EndsWith("/feed",StringComparison.Ordinal);
+            if(!feed && dir!=null)return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(File.ReadAllText(Path.Combine(dir,"digest.json")),Encoding.UTF8,"application/json")});
             var items=Enumerable.Range(1,feed?20:5).Select(i=>feed?(object)new{id=i.ToString(),title="Тестовая новость "+i+": городские библиотеки открывают новые читальные залы",summary="Пример текста для проверки раскрытия новости. Это тестовые данные интерфейса, а не новостное сообщение.",source="Тестовая редакция",publishedAt="2026-11-24 20:00",url="https://example.org/story",notes=new[]{"Тестовая сноска источника, которую нужно сохранить целиком."}}:new{postId=i.ToString(),head="Тестовая сводка "+i+": новые маршруты и события недели",nsrc=i+2,notes=Array.Empty<string>()});
             string body=System.Text.Json.JsonSerializer.Serialize(new{title=feed?"Лента · тестовые данные":"Главное · тестовые данные",items});
+            if(!feed)body=body.Replace("\"postId\":","\"cover\":\"/cover.jpg\",\"postId\":");
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(body,Encoding.UTF8,"application/json")});
         }
     }
@@ -35,13 +43,20 @@ internal static class NewsDiagnostics
         app.ChangeSettings();island.Show();island.Reveal(false);island.SelectPage("news",false);await Task.Delay(150);
         var view=Diagnostics.Descendants(island).OfType<NewsView>().Single();
         async Task Wait()
-        {var start=DateTime.UtcNow;while(view.Busy && DateTime.UtcNow-start<TimeSpan.FromSeconds(25))await Task.Delay(50);island.UpdateLayout();}
+        {var start=DateTime.UtcNow;while(view.Busy && DateTime.UtcNow-start<TimeSpan.FromSeconds(25))await Task.Delay(50);await Task.Delay(350);island.UpdateLayout();}
         void Capture(string name)
         {
             island.UpdateLayout();var bitmap=new RenderTargetBitmap((int)Math.Ceiling(island.ActualWidth),(int)Math.Ceiling(island.ActualHeight),96,96,PixelFormats.Pbgra32);bitmap.Render(island);
             var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));using var stream=File.Create(Path.Combine(directory,name+".png"));encoder.Save(stream);
         }
         await Wait();check("News digest loads through configured HTTP API",view.Shown?.Items.Length>0);Capture("news-digest-dark");
+        var links=new System.Collections.Generic.List<Uri>();view.LinkObserver=links.Add;
+        var brand=Diagnostics.Descendants(view).OfType<Button>().Single(b=>System.Windows.Automation.AutomationProperties.GetName(b)=="Открыть приложение Anyway News");
+        brand.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));check("Anyway logo and name open the mini app",links.Single()==NewsService.AppLink);
+        check("Digest contains the original Anyway logo",Diagnostics.Descendants(brand).OfType<Image>().Any(i=>i.Source!=null));
+        check("Digest has no weather tab",!Diagnostics.Descendants(view).OfType<Button>().Any(b=>System.Windows.Automation.AutomationProperties.GetName(b).Contains("Погода")));
+        var firstStory=Diagnostics.Descendants(view).OfType<Button>().First(b=>System.Windows.Automation.AutomationProperties.GetName(b)==view.Shown!.Items[0].Title);firstStory.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));check("Digest story opens its card in the mini app",links.Last()==view.Shown!.Items[0].Url);
+        check("Digest poster cover decodes",Diagnostics.Descendants(view).OfType<Image>().Count(i=>i.Source!=null)>=2);
         var connection=Diagnostics.Descendants(view).OfType<Button>().Single(b=>Equals(b.Content,"Подключение"));
         var connectionBounds=connection.TransformToAncestor(island).TransformBounds(new Rect(connection.RenderSize));
         check("News footer remains inside the island contour",connectionBounds.Bottom<=island.PaintedHeight-8);
@@ -58,6 +73,11 @@ internal static class NewsDiagnostics
         }
         settings.ColorTheme="Light";app.ChangeSettings();island.SelectPage("news",false);await Task.Delay(120);view=Diagnostics.Descendants(island).OfType<NewsView>().Single();await Wait();Capture("news-digest-light");
         check("News renders with the native Light theme",ThemeInk.IsLight && view.Shown?.Items.Length>0);
+        settings.PanelMaxHeight=417;settings.PanelWidth=420;app.ChangeSettings();island.SelectPage("news",false);await Task.Delay(120);view=Diagnostics.Descendants(island).OfType<NewsView>().Single();await Wait();Capture("news-default-height");
+        var brandDefault=Diagnostics.Descendants(view).OfType<Button>().Single(b=>System.Windows.Automation.AutomationProperties.GetName(b)=="Открыть приложение Anyway News");
+        check("Anyway brand stays visible at the standard 417 DIP height",brandDefault.TransformToAncestor(island).TransformBounds(new Rect(brandDefault.RenderSize)).Bottom<=island.PaintedHeight-8);
+        var heading=Diagnostics.Descendants(view).OfType<TextBlock>().First(t=>t.Text==view.Shown!.Items[0].Title);var bounds=heading.TransformToAncestor(island).TransformBounds(new Rect(heading.RenderSize));
+        check("Main headline stays visible at the standard height",bounds.Top>=50 && bounds.Bottom<brandDefault.TransformToAncestor(island).Transform(new Point()).Y);
         check("News diagnostics did not enable microphone or capture",!app.Assistant.VoiceConnected && !app.Assistant.Desktop.Sharing);
     }
 }
